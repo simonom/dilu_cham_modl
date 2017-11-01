@@ -22,71 +22,110 @@
 % (see the LICENSE file).  If not, see 
 % <http://www.gnu.org/licenses/>.
 % -------------------------------------------------------
+% This version assumes just one VBS that comprises the
+% entire particle (mole fraction=1, mass fraction=1)
 
-
-% Eq. numbers correspond to Jacobson 2005 (Fundamentals of 
-% Atmospheric Modelling)
+% Eq. and table numbers correspond to Jacobson 2005 
+% (Fundamentals of Atmospheric Modelling) unless otherwise 
+% stated
 function part_solv
+
+
+% ---------------------------------------------------------
+% Environmental Variables:
 
 % temperature (K)
 Temp = 298.15;
-% Volume of gas phase (m3)
-VgT = 1.0;
+% air pressure (hPa)
+Pa = 1013.25;
 % time span to solve ode over (s)
 tspan = [0.0 20.0];
-% initial gas-phase concentration of VBS bin (ug/m3)
-Cgqt0 = 20.0;
+% molecular weight dry air (g/mol) (Table 16.1)
+MWda = 28.966;
+% gas constant for dry air (m3.hPa/g.K) (2.24)
+Rda = 8.31451e-2/MWda;
+% density of dry air (g/m3 (air)) (2.23)
+rho_da = Pa/(Rda*Temp);
+% total volume of chamber (m3)
+VT = 1.0;
+
+
+% ---------------------------------------------------------
+% Particle Properties:
+
 % radius of particle (m)
 rad = 1.0e-7;
 % volume of one particle (m3)
-Vi0 = (4.0/3.0)*pi*rad^3.0;
-% number concentration of particles in size bin (#/m3)
-Npb = 10.0;
-% VBS molecular weights (g/mol) of condensed phase
-% from CRC online handbook
-MW = [200.0];
-rho = [0.8]; % VBS densities (g/m3)
-% initial mass fraction of VBS bins in particle phase
-MF0 = [0.5];
-% initial volume of VBS in one particle (m3)
-rho_bar = sum(rho*MF0); % average initial density (g/m3)
-Mit = (rho_bar*Vi0); % mass of particle (g)
-Vqi0 = (MF0*Mit)/rho; % volume of each component (m3)
+Vi = (4.0/3.0)*pi*rad^3.0;
+% number concentration of particles per size bin (#/m3)
+Npb = 1.0e6;
 
+
+% ---------------------------------------------------------
+% VBS Properties:
+
+% VBS molecular weights (g/mol (particle))
+MW = 200.0;
+rho = 8.0e6; % densities (g/m3)
+% saturation vapour pressure (Pa (in SI base units: kg/m.s2)
+P_q_ref = 1.0e-3;
+% saturation concentration (ug/m3 (air)) (eq. 1 O'Meara 
+% 2014), R has units kg.m2/s2.mol.K (p. 533 Jacobson 2005)
+C_qg_ref = (1.0e6*MW*P_q_ref)/(8.31451*Temp);
+% gas-phase concentration (ug/m3 (air))
+C_gq0 = 0.0;
+C_gq00 = C_gq0;
+% mass fraction of particle phase comprised per VBS
+MF = 1.0;
 % accommodation coefficient (fraction)
-alpha=1.0;
-% air pressure (hPa)
-Pa = 1013.25;
-% molecular weight dry air (g/mol)
-MWda = 28.966;
-% gas constant for dry air (m3.hPa/g.K)
-Rda = 8.31451e-2/MWda;
-% density of dry air (g/m3)
-rho_da = Pa/(Rda*Temp);
-% gas-phase diffusion coefficient of VBS bins (m2/s) (16.17) corrected
-% for non-continuum effects
+alpha = 1.0;
+% gas-phase diffusion coefficient of VBS bins (m2/s) (16.17) 
+% corrected for non-continuum effects
 Dq = Dg_calc(MW, Temp, rho_da, MWda, rad, alpha);
-% effective saturation vapour pressure of components (Pa) corrected for
-% curvature and solute effects
-P_qs = P_qs_calc(P_qs_ref, Temp, MF0, MW, rad, rho_bar);
 
 
-% call on ode solver to find new volume in particle
-% (ug/m3)
-[~, Vqit] = ode45(@(tspan, Vqi0) part_ode(tspan, ...
-                Vqi0, rad, Npb, Dq, Vi0, Vqi0, Cgqt0, rho, VgT), tspan, Vqi0);
+% ---------------------------------------------------------
+% VBS and Particle Properties:
+
+% average initial density of particle (g/m3 (particle))
+rho_bar = sum(rho*MF); 
+Mi0 = (rho_bar*Vi)*1.0e6; % mass of one particle (ug)
+% total mass of particles (ug)
+Mi0T = Mi0*Npb*VT;
+% concentration of VBS in particle phase (ug/m3 (particle))
+C_qp = (MF*Mi0)/Vi;
+% surface concentration of components (ug/m3 (air)) corrected for
+% curvature (16.33) and solute (16.36) effects
+[crv1, crv2, C_sqt] = C_sqt_calc(C_qg_ref, Temp, MF, MW, rad, rho_bar, C_qp);
+
+
+% ---------------------------------------------------------
+% call on ode solver to find new concentration in gas
+% (ug/m3 (gas)) (eq.3 Zaveri et al. 2008)
+%opts = odeset('RelTol',1e-4,'AbsTol',1e-4); % solver tolerances
+
+[~, C_gqt1] = ode45(@(tspan, C_gq0) part_ode(tspan, ...
+                C_gq0, rad, Npb, Dq, rho, ...
+            crv1, Mi0, VT, C_qg_ref, crv2, C_gq00, C_sqt), tspan, C_gq0);
             
-% [~, Cgqt] = ode45(@(tspan, Cgqt0) part_ode(tspan, ...
-%                 Cgqt0, rad, Npb, Dgi, Vi0, Vqi0, rho, VgT), tspan, Cgqt0);
+% mass gained in gas phase (ug)
+delta_mg = ((C_gqt1(end))-C_gq0)*VT;
 
-% convert to gas-phase concentration (g/m3)
-Cgqt = Cgqt0-(((Vqit-Vqi0)*rho*Npb)/VgT);
-            
-disp(Cgqt)
+% check in case everything evaporates in this time step
+if delta_mg>Mi0T
+    C_gqt1(end) = Mi0*Npb;
+    delta_mg = ((C_gqt1(end))-C_gq0)*VT;
+end
 
-    % function that defines the ode
-    function V1 = part_ode(~, Vqit, rad, Npb, Dq, Vit, Vqith, Cgqt, rho, VgT)
-    %function C1 = part_ode(~, Cgqt, rad, Npb, Dgi, Vit, Vqith, rho, VgT)
+% mass fraction remaining in particle phase (ug)
+mfr = (Mi0T-delta_mg)/Mi0T;
+% display result
+disp(mfr)
+
+    % function that defines the ode (eq. 3 Zaveri et al. 2008)
+    function C1 = part_ode(~, C_gqt, rad, Npb, Dq, rho, ...
+            crv1, m_p, VT, C_qg_ref, crv2, C_gq0, C_sqt)
+        
         % ----------------------------------------------------
         % inputs:
         % t - time to solve over (s)
@@ -94,32 +133,51 @@ disp(Cgqt)
         % phase (ug/m3)
         % rad - particle radii (m)
         % Npb - number per bin (#/m3)
-        % Vit - initial volume of one particle (m3)
-        % Vqi0 - initial volume of components in one 
-        % particle (m3)
-        % Vqit - initial guess for new component volume 
-        % (m3) in one particle
+        % Dq - diffusion coefficient (m2/s)
         % rho - component density (g/m3)
-        % VgT - total volume of gas phase
+        % C_sqt - corrected surface concentration (ug/m3 (air))
+        % m_p - one particle mass (g)
+        % VT - total gas-phase volume (m3)
+        % C_qg_ref - reference saturation concentration (ug/m3 (air))
+        % Temp - temperature (K)
+        % MF - particle-phase mass fractions from VBS
+        % MW - VBS molecular weight (g/mol)
+        % rho_bar - average particle density (g/m3)
+        % C_qp
         % ----------------------------------------------------
 
 
-        % mass transfer rate (/s)
-        %kimt = part_tran_rate(rad, Npb, Dgi, Vit, Vqith, Vqit, rho_da);
-        % effective saturation concentration (ug/m3)
-        Cstar_imt = 10.0;
-        kimt=1.0;
-        % code to solve the partitioning equation using an ode 
-        % solver.  Eq. 16.51.  Gives change in volume of each 
-        % component in particle phase and therefore loss/gain of volume
-        % from/to gas phase for condensation/evaporation
-        V1 = kimt*((Cgqt-(((Vqit)*rho*Npb)/VgT))-Cstar_imt);
-        %C1 = -kimt*(Cgqt-Cstar_imt);
+        % mass transfer rate (m3/s) (eq. 5 Zaveri et al. 2008)
+%         k_qt = part_tran_rate(rad, Dq, Npb);
+        
+        
+        % partitioning equation.  Gives change in concentration 
+        % in gas phase (eq. 3 Zaveri et al. 2008)
+        % this first equation for C1 accounts for partitioning effect on
+        % particle size and therefore curvature effect and mass transfer
+        % rate
+        % the first line is the mass transfer rate (/s)
+        % second line is the gas-phase concentration
+        % third line is the saturation concentration corrected for solute
+        % effect
+        % fourth line is correction of saturation concentration due to
+        % curvature effect
+        C1 = (-4.0*pi*(((3.0/(4.0*pi))*((m_p-(((C_gqt-C_gq0)*VT)/Npb))*(1.0/(rho*1.0e6))))^(1.0/3.0))*Npb*Dq)*...
+            (C_gqt-...
+            C_qg_ref*1.0*...
+            (exp(crv1/(crv2*(((3.0/(4.0*pi))*((m_p-(((C_gqt-C_gq0)*VT)/Npb))*(1.0/(rho*1.0e6))))^(1.0/3.0))))));
+        % equation used in MOSAIC (partitioning effect on radius assumed
+        % negligible and therefore mass transfer rate and curvature effect
+        % assumed constant)
+%         C1 = -k_qt*(C_gqt-C_sqt); 
+        
+        % can show radius change with time
+        %disp((((3.0/(4.0*pi))*((m_p-(((C_gqt-C_gq0)*VT)/Npb))*(1.0/(rho*1.0e6))))^(1.0/3.0)))
+        
         
     end
     
-    % function to calculate gas-phase diffusion coefficient 
-    % (16.17)
+    % function to calculate gas-phase diffusion coefficient (16.17)
     function Dq = Dg_calc(MW, Temp, rho_da, MWda, rad, alpha)
         
         % -------------------------------------------------
@@ -146,15 +204,18 @@ disp(Cgqt)
         omega = ((1.0+((1.33+0.71*Kn^-1.0)/(1.0+Kn^-1.0)+...
             (4.0*(1.0-alpha))/(3.0*alpha))*Kn)^-1.0);
         % correction factor for venting effects 
-        % (only necessary for relatively large particles) (16.24)
+        % (only necessary for relatively large particles) 
+        % (16.24)
         Fq = 1.0;
-        % Corrected gas-phase diffusion coefficient (m2/s) (16.18)
+        % corrected gas-phase diffusion coefficient (m2/s) 
+        % (16.18)
         Dq = Dq*omega*Fq;
         
     end
 
     % estimate effective saturation vapour pressure
-    function P_qs = P_qs_calc(P_qs_ref, Temp, MF0, MW, rad, rho_bar)
+    function [crv1, crv2, C_sqt] = C_sqt_calc(C_q_ref, Temp, MF, MW, ...
+            rad, rho_bar, C_qp)
     
         % -------------------------------------------------
         % inputs:
@@ -164,33 +225,35 @@ disp(Cgqt)
         % MW - VBS molecular weights (g/mol)
         % rad - particle radius (m)
         % rho_bar - average particle density (g/m3)
+        % C_qp - concentration of VBS in particle phase 
+        % (ug/m3 (particle))
         % -------------------------------------------------
         
         % estimate surface tension (14.19) (see p533 if 
         % you want to include the effects of organics and 
         % inorganic ions)
         if Temp-273.15>=0
-            sigma = 76.1-0.155*Temp;
+            sigma = 76.1-0.155*(Temp-273.15);
         end
         % average particle molecular weight (g/mol)
-        mp_bar = sum(MF0*MW);
+        mp_bar = sum(MF*MW);
         % curvature (Kelvin) term (16.33)
-        curv = 1.0+(2.0*sigma*mp_bar)/(rad*8.31451e3*Temp*rho_bar);
-        % mole fraction in condensed phase
-        x_q = C_q/C_T;
+        curv = exp((2.0*sigma*mp_bar)/(rad*8.31451e3*Temp*rho_bar));
+        % mole fraction in condensed phase (16.36)
+        x_q = C_qp/sum(C_qp);
         % correct saturation vapour pressure to account for curvature and
-        % solute effect (eq. 3 Riipinen et al. 2010 for solute effect, i.e.
-        % Raoult's law
-        % combined with 16.33 of Jacobson 2005 for for curvature effect)
-        P_qs = (P_qs_ref*(x_q))*(1+curv);
+        % solute effect (16.33, 16.36 and combined effect in 16.39)
+        C_sqt = (C_q_ref*x_q*curv);
+        crv1 = 2.0*sigma*mp_bar;
+        crv2 = 8.31451e3*Temp*rho_bar;
         
         
         
     end
 
     % function that estimates the vapour-particle mass 
-    % transfer rate
-    function k_i_m_t = part_tran_rate(rad, Npb, Dgi, Vit, Vqith, Vqit)
+    % transfer rate (eq. 5 Zaveri et al. 2008)
+    function k_qt = part_tran_rate(rad, Dq, Npb)
 
         % -------------------------------------------------
         % inputs:
@@ -198,18 +261,10 @@ disp(Cgqt)
         % Npb - number per bin (#/m3)
         % Dg - gas-phase diffusion coefficients per bin 
         % (m2/s)
-        % Vit - new volume of components in one particle (m3)
-        % Vqith - old volume of one particle (m3)
-        % Vqit - old volume of components in one particle (m3)
         % -------------------------------------------------
 
-        % new volume of components in one particle (m3)
-        
-        % square brackets in 16.51 
-        k_i_m_t_part1 = (48.0*pi^2.0*(Vqit+Vit-Vqith))^(1.0/3.0);
-        % mass transfer rate (/s)
-        k_i_m_t = Dgi*k_i_m_t_part1;
-        k_i_m_t = 4.0*pi*rad*Npb*k_i_m_t;
+        % mass transfer rate (m3/s) (eq. 5 Zaveri et al. 2008)
+        k_qt = (4.0*pi*rad*Npb*Dq);
         
     end
     % -----------------------------------------------------
